@@ -1,6 +1,7 @@
 # WeRSS Insight
 
 WeRSS Insight 是一个可独立运行的微信公众号文章阅读与总结面板。它从本地 WeRSS API 同步文章，调用任意 OpenAI-compatible 大模型接口生成摘要、价值评分和作者画像，并按计划每三天更新一次。
+werss项目地址：https://github.com/rachelos/we-mp-rss/wiki/WeRSS-%E2%80%90-%E5%BE%AE%E4%BF%A1%E5%85%AC%E4%BC%97%E5%8F%B7%E8%AE%A2%E9%98%85%E5%8A%A9%E6%89%8B
 
 ## 功能
 
