@@ -1,0 +1,1 @@
+"""WeRSS Insight application package."""
