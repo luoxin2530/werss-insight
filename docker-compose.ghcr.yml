@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  werss-insight:
+    image: ${WERSS_INSIGHT_IMAGE:-ghcr.io/YOUR_GITHUB_USERNAME/werss-insight:latest}
+    container_name: werss-insight
+    restart: unless-stopped
+    ports:
+      - "${WERSS_INSIGHT_PORT:-8765}:8765"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

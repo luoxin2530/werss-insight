@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  werss-insight:
+    build: .
+    container_name: werss-insight
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
