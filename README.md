@@ -1,25 +1,68 @@
-# WeRSS Insight
+# WeRSS Insight V0.1.0
 
-WeRSS Insight 是一个可独立运行的微信公众号文章阅读与总结面板。它从本地 WeRSS API 同步文章，调用任意 OpenAI-compatible 大模型接口生成摘要、价值评分和作者画像，并按计划每三天更新一次。
-werss项目地址：https://github.com/rachelos/we-mp-rss/wiki/WeRSS-%E2%80%90-%E5%BE%AE%E4%BF%A1%E5%85%AC%E4%BC%97%E5%8F%B7%E8%AE%A2%E9%98%85%E5%8A%A9%E6%89%8B
+WeRSS Insight 是一个配合 [WeRSS](https://github.com/rachelos/we-mp-rss) 使用的微信公众号文章阅读、总结与知识库面板。它从 WeRSS API 同步公众号文章，用 OpenAI-compatible 模型生成摘要、评分和作者画像，并支持按文章库进行主题问答、图片缓存、阅读管理和数据迁移。
 
-## 功能
+推荐架构：WeRSS 负责公众号授权、订阅和文章抓取；WeRSS Insight 负责阅读、摘要、作者画像、知识库、媒体缓存、备份和提醒。两个容器独立运行，通过 API 协作。
+
+## V0.1.0 功能
 
 - 同步 WeRSS 的公众号、文章、正文状态和运行状态。
-- 对新文章生成一句话摘要、要点、阅读价值、标签和 1-10 分评分。
-- 为每个公众号维护作者画像：能力判断、擅长方向、标签、评分和置信度。
-- 前端面板支持配置、手动运行、阅读队列、文章详情、作者画像和运行记录。
-- 配置页提供近 14 天新增文章、摘要数量和摘要 token 消耗看板。
-- 支持导出/导入 ZIP 备份包，迁移 Docker 实例时可直接带走配置、文章、摘要和作者画像。
-- 可选 Webhook 阅读提醒：每次计划更新后推送高分文章列表。
-- 没有配置大模型时，会使用本地启发式规则兜底，不阻塞同步。
+- 手动总结和计划总结默认处理全部待总结文章，不再隐藏限制为 30 篇。
+- 使用通用中文阅读助手口径生成摘要、要点、阅读价值、标签、难度和 1-10 分评分。
+- 为公众号生成作者画像，包括能力判断、擅长方向、使用限制、标签、评分和置信度。
+- 作者卡片可点击查看该公众号的文章列表，文章标题可继续进入正文阅读。
+- 保留正文图片和基础排版，并支持本地图片压缩缓存。
+- 支持三种图片模式：`optimized_local`、`remote`、`off`。
+- 支持知识库问答：文章切块、远程 embedding、向量检索、LLM 综合回答和引用来源展示。
+- 配置页支持模型连接测试，显示连接结果、HTTP 状态、延迟和 token。
+- 配置页提供近况看板，按天统计新增文章、摘要数量和 token 消耗。
+- 支持 ZIP 备份和恢复，包含数据库、配置和媒体缓存目录，便于 Docker 实例迁移。
+- 支持定时同步、阅读状态、收藏和 Webhook 高分文章提醒。
+- 未配置模型时仍可用本地规则摘要兜底，方便先部署后配置。
 
-## 本地运行
+## 快速部署
+
+### 使用预构建镜像
+
+推荐在服务器上把项目放到你的数据目录，例如：
+
+```bash
+mkdir -p /vol1/1000/werss-insight
+cd /vol1/1000/werss-insight
+git clone https://github.com/luoxin2530/werss-insight.git .
+cp .env.example .env
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+访问：
+
+```text
+http://服务器IP:8765
+```
+
+可以先不填写 key。保持 `.env` 里的 key 为空，容器仍能启动；打开页面后在「配置」里填写 WeRSS 和模型接口，配置会保存到 `data/werss_insight.db`。
+
+如果要固定使用你的服务器路径，可以在 `.env` 里设置：
+
+```env
+WERSS_INSIGHT_DATA_DIR=/vol1/1000/werss-insight/data
+```
+
+### 从源码构建
+
+```bash
+git clone https://github.com/luoxin2530/werss-insight.git
+cd werss-insight
+cp .env.example .env
+docker compose up -d --build
+```
+
+### 本地开发运行
 
 ```powershell
-cd C:\Users\madri\Documents\Codex\2026-05-09\werss-insight
+git clone https://github.com/luoxin2530/werss-insight.git
+cd werss-insight
 Copy-Item .env.example .env
-notepad .env
 python -m pip install -r requirements.txt
 .\run.ps1
 ```
@@ -30,120 +73,153 @@ python -m pip install -r requirements.txt
 http://localhost:8765
 ```
 
-也可以先不写 `.env`，启动后在面板的「配置」页填写 WeRSS 和大模型接口。密钥会保存到 `data/werss_insight.db`，不会写进源码。
+## 关键配置
 
-## Docker 部署
+### WeRSS
 
-本地构建：
-
-```bash
-cd /path/to/werss-insight
-cp .env.example .env
-nano .env
-docker compose up -d --build
-```
-
-访问：
-
-```text
-http://服务器IP:8765
-```
-
-这个 compose 只创建 `werss-insight` 一个容器，使用独立端口 `8765` 和当前目录下的 `data` 卷，不会修改你的 `we-mp-rss` 容器。
-
-## GitHub + GHCR 部署
-
-把源码推到 GitHub 后，`.github/workflows/docker-publish.yml` 会在 `main` 分支更新时自动构建镜像并推送到 GitHub Container Registry：
-
-```text
-ghcr.io/<你的 GitHub 用户名>/<仓库名>:latest
-```
-
-服务器上可以只保留 `.env`、`docker-compose.ghcr.yml` 和 `data/`：
-
-```bash
-mkdir -p /var/apps/werss-insight
-cd /var/apps/werss-insight
-wget https://raw.githubusercontent.com/<你的 GitHub 用户名>/<仓库名>/main/docker-compose.ghcr.yml
-wget https://raw.githubusercontent.com/<你的 GitHub 用户名>/<仓库名>/main/.env.example -O .env
-nano .env
-```
-
-把 `docker-compose.ghcr.yml` 里的默认镜像改成你的镜像，或者在 `.env` 里加入：
+如果 WeRSS 和 Insight 在同一个 Docker network，可以使用容器名：
 
 ```env
-WERSS_INSIGHT_IMAGE=ghcr.io/<你的 GitHub 用户名>/<仓库名>:latest
-WERSS_INSIGHT_PORT=8765
+WERSS_BASE_URL=http://we-mp-rss:8001
+WERSS_ACCESS_KEY=
+WERSS_SECRET_KEY=
+SYNC_LIMIT=100
 ```
 
-启动：
+如果 WeRSS 已经通过局域网端口暴露，例如 `http://192.168.68.100:8011`，就把 `WERSS_BASE_URL` 改成对应地址。
 
-```bash
-docker compose -f docker-compose.ghcr.yml pull
-docker compose -f docker-compose.ghcr.yml up -d
+`SYNC_LIMIT=0` 表示同步时不限制文章数量。
+
+### 摘要模型
+
+使用 OpenAI-compatible `/chat/completions` 接口：
+
+```env
+ALLOW_LLM=true
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=
+LLM_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=0.2
+LLM_TIMEOUT_SECONDS=120
+MAX_ARTICLE_CHARS=12000
 ```
 
-更新：
+未配置模型时，会使用本地规则摘要和画像，流程不会阻塞。配置页可以测试连接并显示延迟。
 
-```bash
-cd /var/apps/werss-insight
-docker compose -f docker-compose.ghcr.yml pull
-docker compose -f docker-compose.ghcr.yml up -d
+### 知识库问答
+
+知识库使用远程 embedding API，不在本地加载模型：
+
+```env
+RAG_ENABLED=true
+RAG_API_BASE_URL=https://api.openai.com/v1
+RAG_API_KEY=
+RAG_EMBEDDING_MODEL=text-embedding-3-small
+RAG_CHAT_MODEL=gpt-4o-mini
+RAG_CHUNK_SIZE=900
+RAG_CHUNK_OVERLAP=140
+RAG_TOP_K=8
 ```
 
-## 大模型接口
+使用步骤：
 
-配置项按 OpenAI-compatible `/chat/completions` 约定：
+1. 在配置页填写知识库模型参数。
+2. 打开「知识库」页。
+3. 点击「重建索引」。
+4. 索引完成后开始提问。
 
-- `LLM_BASE_URL`：例如 `https://api.openai.com/v1`、自建网关或其他兼容服务。
-- `LLM_API_KEY`：模型接口密钥。
-- `LLM_MODEL`：模型名称。
-- `ALLOW_LLM=false` 时只用本地规则评分和画像。
+### 图片缓存
 
-## 阅读提醒
+```env
+MEDIA_CACHE_MODE=optimized_local
+MEDIA_MAX_WIDTH=1800
+MEDIA_IMAGE_QUALITY=85
+MEDIA_PREFER_WEBP=true
+```
 
-配置 `NOTIFY_WEBHOOK_URL` 后，计划任务完成时会把评分超过 `NOTIFY_MIN_SCORE` 的前 `NOTIFY_TOP_N` 篇文章发送到该 Webhook。默认关闭提醒。
+模式说明：
 
-## 计划任务
+- `optimized_local`：默认模式，下载图片、压缩、按公众号和文章保存。
+- `remote`：不下载图片，只保留远程引用，最省空间但长期稳定性较弱。
+- `off`：不缓存图片。
 
-默认配置：
+### 计划任务和提醒
 
-- `AUTO_RUN=true`
-- `SCHEDULE_DAYS=3`
-- `SCHEDULE_TIME=09:00`
+```env
+AUTO_RUN=true
+SCHEDULE_DAYS=3
+SCHEDULE_TIME=09:00
+NOTIFY_WEBHOOK_URL=
+NOTIFY_MIN_SCORE=7.5
+NOTIFY_TOP_N=8
+```
 
-到点后会执行完整流程：同步 WeRSS -> 总结新文章 -> 更新作者画像。也可以在面板里手动点击「同步并总结」。
+计划任务会执行完整流程：同步 WeRSS、总结未处理文章、更新作者画像、发送可选提醒。
 
-## 数据位置
+## 数据目录
 
-- SQLite 数据库：`data/werss_insight.db`
-- 备份包目录：`data/backups`
-- 媒体目录：`data/media`
-- 配置、文章摘要、作者画像、阅读状态都在这个库里。
+```text
+data/
+├─ werss_insight.db       # SQLite 数据库
+├─ backups/               # ZIP 备份包
+└─ media/
+   └─ accounts/           # 优化后的文章图片缓存
+```
 
-## 迁移与备份
+数据库保存配置、文章、摘要、画像、阅读状态、知识库片段和向量。图片默认不存入数据库，而是保存在 `data/media`。
+
+## 备份与迁移
 
 在「配置」页点击「下载备份包」会生成 ZIP，包含：
 
-- `data/werss_insight.db`：数据库快照，包含文章正文、摘要、画像、阅读状态和配置。
-- `config.json`：配置导出，方便人工检查。
-- `data/media`：媒体目录，用于保存同步时缓存下来的文章图片。
+- SQLite 数据库快照
+- 配置导出
+- 媒体缓存目录
 
-在目标 Docker 实例的「配置」页上传该 ZIP 即可恢复。恢复会覆盖目标实例数据库，导入前请确认目标实例可被替换。
+在目标实例上传 ZIP 即可恢复。恢复会覆盖目标数据库，导入前请确认目标实例是空库或可以被替换。
 
 ## API
 
-- `GET /api/dashboard`
-- `GET /api/stats/daily`
-- `GET /api/backup/export`
-- `POST /api/backup/import`
-- `GET /api/articles`
-- `GET /api/articles/{id}`
-- `PATCH /api/articles/{id}`
-- `GET /api/accounts`
-- `GET /api/config`
-- `PUT /api/config`
-- `POST /api/run/full`
-- `POST /api/run/sync`
-- `POST /api/run/summarize`
-- `GET /api/werss/status`
+常用接口：
+
+```text
+GET  /api/dashboard
+GET  /api/stats/daily
+GET  /api/run/status
+POST /api/run/full
+POST /api/run/sync
+POST /api/run/summarize
+
+GET  /api/articles
+GET  /api/articles/{id}
+PATCH /api/articles/{id}
+
+GET  /api/accounts
+GET  /api/accounts/{id}
+
+GET  /api/knowledge/status
+POST /api/knowledge/rebuild
+POST /api/knowledge/ask
+
+GET  /api/config
+PUT  /api/config
+POST /api/config/test-llm
+
+GET  /api/backup/export
+POST /api/backup/import
+```
+
+## 发布镜像
+
+GitHub Actions 会在推送 `main` 或 `v*.*.*` 标签时构建并发布镜像：
+
+```text
+ghcr.io/luoxin2530/werss-insight:latest
+ghcr.io/luoxin2530/werss-insight:v0.1.0
+```
+
+## 安全提醒
+
+- 不要把 `.env`、真实 API key、数据库、备份包或媒体缓存提交到 GitHub。
+- 建议把数据目录挂载到宿主机，例如 `/vol1/1000/werss-insight/data:/app/data`。
+- GitHub token 建议只给最小必要权限，发布后可按需轮换。

@@ -10,4 +10,4 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      - "${WERSS_INSIGHT_DATA_DIR:-./data}:/app/data"

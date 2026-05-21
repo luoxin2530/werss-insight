@@ -715,6 +715,100 @@ select {
   overscroll-behavior: contain;
 }
 
+.knowledge-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.4fr);
+  gap: 18px;
+  align-items: start;
+  height: calc(100vh - 150px);
+  min-height: 0;
+}
+
+.knowledge-pane,
+.knowledge-answer {
+  min-height: 0;
+  max-height: 100%;
+}
+
+.knowledge-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.knowledge-form,
+.knowledge-answer-body {
+  padding: 16px;
+}
+
+.knowledge-form {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.knowledge-form textarea {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf7;
+  padding: 10px 12px;
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.6;
+}
+
+.knowledge-actions {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+}
+
+.knowledge-actions .action {
+  margin-top: 0;
+}
+
+.knowledge-status {
+  margin-top: 14px;
+}
+
+.knowledge-answer {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.knowledge-answer-body {
+  display: grid;
+  gap: 14px;
+  color: #2b3031;
+  line-height: 1.75;
+}
+
+.knowledge-answer-body h4 {
+  font-size: 14px;
+}
+
+.knowledge-answer-body ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.source-list {
+  display: grid;
+  gap: 10px;
+}
+
+.source-item {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fffdf7;
+}
+
 .account-detail-score {
   min-width: 100px;
   text-align: right;
@@ -980,16 +1074,21 @@ label {
 @media (max-width: 1180px) {
   .account-layout,
   .account-panels,
+  .knowledge-layout,
   .settings-grid {
     grid-template-columns: 1fr;
   }
 
-  .account-layout {
+  .account-layout,
+  .knowledge-layout {
     height: auto;
   }
 
   .account-grid,
-  .account-detail-pane {
+  .account-detail-pane,
+  .knowledge-pane,
+  .knowledge-answer,
+  .knowledge-form {
     max-height: none;
     overflow: visible;
   }
@@ -1010,7 +1109,7 @@ label {
 
   .nav {
     grid-column: 1 / -1;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
   }
 
   .metric-grid,

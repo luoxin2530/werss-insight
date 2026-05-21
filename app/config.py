@@ -39,6 +39,18 @@ class Settings:
     notify_webhook_url: str = os.getenv("NOTIFY_WEBHOOK_URL", "")
     notify_min_score: float = float(os.getenv("NOTIFY_MIN_SCORE", "7.5"))
     notify_top_n: int = int(os.getenv("NOTIFY_TOP_N", "8"))
+    media_cache_mode: str = os.getenv("MEDIA_CACHE_MODE", "optimized_local")
+    media_max_width: int = int(os.getenv("MEDIA_MAX_WIDTH", "1800"))
+    media_image_quality: int = int(os.getenv("MEDIA_IMAGE_QUALITY", "85"))
+    media_prefer_webp: bool = env_bool("MEDIA_PREFER_WEBP", True)
+    rag_enabled: bool = env_bool("RAG_ENABLED", True)
+    rag_api_base_url: str = os.getenv("RAG_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    rag_api_key: str = os.getenv("RAG_API_KEY", "")
+    rag_embedding_model: str = os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-3-small")
+    rag_chat_model: str = os.getenv("RAG_CHAT_MODEL", "gpt-4o-mini")
+    rag_chunk_size: int = int(os.getenv("RAG_CHUNK_SIZE", "900"))
+    rag_chunk_overlap: int = int(os.getenv("RAG_CHUNK_OVERLAP", "140"))
+    rag_top_k: int = int(os.getenv("RAG_TOP_K", "8"))
 
 
 def get_settings() -> Settings:
@@ -56,7 +68,7 @@ def settings_from_mapping(values: dict) -> Settings:
 
 def public_settings(settings: Settings) -> dict:
     data = {field.name: getattr(settings, field.name) for field in fields(Settings)}
-    for key in ["werss_access_key", "werss_secret_key", "llm_api_key", "notify_webhook_url"]:
+    for key in ["werss_access_key", "werss_secret_key", "llm_api_key", "rag_api_key", "notify_webhook_url"]:
         value = str(data.get(key) or "")
         data[key] = {
             "configured": bool(value),

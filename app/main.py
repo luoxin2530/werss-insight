@@ -21,7 +21,10 @@ from .service import (
     full_update,
     get_account,
     get_article,
+    ask_knowledge,
     is_run_active,
+    knowledge_rebuild_update,
+    knowledge_status,
     list_accounts,
     list_articles,
     mark_article,
@@ -54,6 +57,18 @@ class ConfigUpdate(BaseModel):
     notify_webhook_url: str | None = None
     notify_min_score: float | None = None
     notify_top_n: int | None = None
+    media_cache_mode: str | None = None
+    media_max_width: int | None = None
+    media_image_quality: int | None = None
+    media_prefer_webp: bool | None = None
+    rag_enabled: bool | None = None
+    rag_api_base_url: str | None = None
+    rag_api_key: str | None = None
+    rag_embedding_model: str | None = None
+    rag_chat_model: str | None = None
+    rag_chunk_size: int | None = None
+    rag_chunk_overlap: int | None = None
+    rag_top_k: int | None = None
 
 
 class ArticlePatch(BaseModel):
@@ -68,6 +83,12 @@ class LlmTestRequest(BaseModel):
     llm_temperature: float | None = None
     llm_timeout_seconds: int | None = None
     allow_llm: bool | None = None
+
+
+class KnowledgeAskRequest(BaseModel):
+    question: str
+    top_k: int | None = None
+    mp_id: str | None = None
 
 
 @asynccontextmanager
@@ -208,6 +229,24 @@ def patch_article(article_id: str, payload: ArticlePatch) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/api/knowledge/status")
+def api_knowledge_status() -> dict[str, Any]:
+    return knowledge_status()
+
+
+@app.post("/api/knowledge/rebuild")
+async def api_knowledge_rebuild(limit: int | None = None) -> dict[str, Any]:
+    return schedule_task(lambda: knowledge_rebuild_update(limit=limit), "knowledge", "已启动知识库索引")
+
+
+@app.post("/api/knowledge/ask")
+async def api_knowledge_ask(payload: KnowledgeAskRequest) -> dict[str, Any]:
+    try:
+        return await ask_knowledge(payload.question, top_k=payload.top_k, mp_id=payload.mp_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def schedule_task(factory, run_type: str, message: str) -> dict[str, str]:
     if is_run_active():
         return {"status": "busy", "message": "已有更新任务正在运行"}
@@ -222,12 +261,12 @@ async def run_sync(limit: int | None = None) -> dict[str, Any]:
 
 
 @app.post("/api/run/summarize")
-async def run_summarize(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
+async def run_summarize(limit: int | None = Query(None, ge=0, le=10000)) -> dict[str, Any]:
     return schedule_task(lambda: summarize_update(limit=limit), "summarize", "已启动总结")
 
 
 @app.post("/api/run/full")
-async def run_full(limit: int | None = None, summarize_limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+async def run_full(limit: int | None = None, summarize_limit: int | None = Query(None, ge=0, le=10000)) -> dict[str, Any]:
     return schedule_task(
         lambda: full_update(limit=limit, summarize_limit=summarize_limit),
         "full_update",

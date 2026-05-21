@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WeRSS Insight</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260520-4" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260521-1" />
   </head>
   <body>
     <div class="shell">
@@ -21,6 +21,7 @@
           <button class="nav-item active" data-view="dashboard">总览</button>
           <button class="nav-item" data-view="reader">阅读队列</button>
           <button class="nav-item" data-view="accounts">作者画像</button>
+          <button class="nav-item" data-view="knowledge">知识库</button>
           <button class="nav-item" data-view="settings">配置</button>
         </nav>
 
@@ -108,6 +109,28 @@
           </div>
         </section>
 
+        <section class="view" id="knowledgeView">
+          <div class="knowledge-layout">
+            <section class="panel knowledge-pane">
+              <div class="panel-head">
+                <h3>全库提问</h3>
+                <button class="text-button" id="rebuildKnowledge" type="button">重建索引</button>
+              </div>
+              <div class="knowledge-form">
+                <textarea id="knowledgeQuestion" rows="5" placeholder="输入一个跨文章问题"></textarea>
+                <div class="knowledge-actions">
+                  <input id="knowledgeTopK" type="number" min="1" max="30" value="8" />
+                  <button class="action primary" id="askKnowledge" type="button">提问</button>
+                </div>
+                <dl class="status-list knowledge-status" id="knowledgeStatus"></dl>
+              </div>
+            </section>
+            <section class="panel knowledge-answer" id="knowledgeAnswer">
+              <div class="empty-state">知识库索引完成后，可以按主题比较多篇文章的观点和逻辑。</div>
+            </section>
+          </div>
+        </section>
+
         <section class="view" id="settingsView">
           <form class="settings-grid" id="configForm">
             <section class="panel">
@@ -141,6 +164,32 @@
               <label>提醒篇数<input name="notify_top_n" type="number" min="1" max="30" /></label>
               <label class="check-row"><input name="auto_run" type="checkbox" />自动运行</label>
               <button class="action primary wide" type="submit">保存配置</button>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><h3>媒体缓存</h3></div>
+              <label>
+                图片模式
+                <select name="media_cache_mode">
+                  <option value="optimized_local">本地压缩缓存</option>
+                  <option value="remote">远程引用</option>
+                  <option value="off">不缓存</option>
+                </select>
+              </label>
+              <label>最大图片宽度<input name="media_max_width" type="number" min="0" max="6000" /></label>
+              <label>图片质量<input name="media_image_quality" type="number" min="50" max="95" /></label>
+              <label class="check-row"><input name="media_prefer_webp" type="checkbox" />优先保存 WebP</label>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><h3>知识库</h3></div>
+              <label>向量接口地址<input name="rag_api_base_url" /></label>
+              <label>向量 API Key<input name="rag_api_key" type="password" placeholder="留空表示不修改" /></label>
+              <label>向量模型<input name="rag_embedding_model" /></label>
+              <label>问答模型<input name="rag_chat_model" /></label>
+              <label>片段长度<input name="rag_chunk_size" type="number" min="200" max="3000" /></label>
+              <label>召回数量<input name="rag_top_k" type="number" min="1" max="30" /></label>
+              <label class="check-row"><input name="rag_enabled" type="checkbox" />启用知识库问答</label>
             </section>
 
             <section class="panel span-two">
@@ -189,6 +238,6 @@
     </div>
 
     <div class="toast" id="toast"></div>
-    <script src="/static/app.js?v=20260520-5" type="module"></script>
+    <script src="/static/app.js?v=20260521-1" type="module"></script>
   </body>
 </html>

@@ -6,20 +6,25 @@ import sqlite3
 import tempfile
 import zipfile
 from dataclasses import asdict
+from io import BytesIO
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import DATA_DIR, DB_PATH, Settings, get_settings, settings_from_mapping
 from .db import connect, get_setting, init_db, json_dumps, json_loads, set_setting, utc_now
 from .llm import (
+    EmbeddingClient,
     LlmClient,
     article_outline,
+    cosine_similarity,
     heuristic_article_summary,
     heuristic_profile,
+    split_text_for_rag,
     strip_html,
 )
 from .werss_client import WeRssClient
@@ -160,7 +165,9 @@ def media_dir() -> Path:
 
 
 def media_public_path(relative_path: str) -> str:
-    normalized = relative_path.replace("\\", "/")
+    normalized = relative_path.replace("\\", "/").lstrip("/")
+    if normalized.startswith("media/"):
+        normalized = normalized[len("media/") :]
     return f"/media/{normalized}"
 
 
@@ -199,6 +206,145 @@ def media_extension(content_type: str, url: str) -> str:
     return suffix if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"} else ".img"
 
 
+def content_type_from_path(path: str, fallback: str = "image/jpeg") -> str:
+    suffix = Path(path).suffix.lower()
+    mapping = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+    }
+    return mapping.get(suffix, fallback)
+
+
+def safe_path_segment(value: str | None, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        text = fallback
+    text = re.sub(r"[^\w.-]+", "_", text, flags=re.UNICODE).strip("._")
+    return text[:96] or fallback
+
+
+def media_target_dir(mp_id: str | None, article_id: str) -> Path:
+    return media_dir() / "accounts" / safe_path_segment(mp_id, "unknown_account") / safe_path_segment(article_id, "unknown_article")
+
+
+def media_filename(index: int, url: str, suffix: str) -> str:
+    return f"{index:03d}-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]}{suffix}"
+
+
+def optimize_image_bytes(
+    content: bytes,
+    content_type: str,
+    settings: Settings,
+) -> tuple[bytes, str, str, bool]:
+    if content_type in {"image/gif", "image/svg+xml"}:
+        return content, content_type, media_extension(content_type, ""), False
+
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image = ImageOps.exif_transpose(image)
+            if settings.media_max_width > 0 and image.width > settings.media_max_width:
+                ratio = settings.media_max_width / image.width
+                target_height = max(1, round(image.height * ratio))
+                image = image.resize((settings.media_max_width, target_height), Image.LANCZOS)
+
+            has_alpha = image.mode in {"RGBA", "LA"} or (
+                image.mode == "P" and "transparency" in image.info
+            )
+            quality = max(50, min(95, int(settings.media_image_quality)))
+            candidates: list[tuple[bytes, str, str]] = []
+
+            if settings.media_prefer_webp and content_type != "image/svg+xml":
+                output = BytesIO()
+                webp_image = image.convert("RGBA" if has_alpha else "RGB")
+                webp_image.save(output, format="WEBP", quality=quality, method=6)
+                candidates.append((output.getvalue(), "image/webp", ".webp"))
+
+            if has_alpha or content_type == "image/png":
+                output = BytesIO()
+                png_image = image.convert("RGBA" if has_alpha else "RGB")
+                png_image.save(output, format="PNG", optimize=True)
+                candidates.append((output.getvalue(), "image/png", ".png"))
+            else:
+                output = BytesIO()
+                jpeg_image = image.convert("RGB")
+                jpeg_image.save(output, format="JPEG", quality=quality, optimize=True, progressive=True)
+                candidates.append((output.getvalue(), "image/jpeg", ".jpg"))
+
+            best_content, best_type, best_suffix = min(candidates, key=lambda item: len(item[0]))
+            if len(best_content) < len(content):
+                return best_content, best_type, best_suffix, True
+            return content, content_type, media_extension(content_type, ""), False
+    except (UnidentifiedImageError, OSError):
+        return content, content_type, media_extension(content_type, ""), False
+
+
+def migrate_cached_media(
+    article_id: str,
+    mp_id: str | None,
+    index: int,
+    url: str,
+    row: Any,
+    settings: Settings,
+) -> dict[str, Any] | None:
+    local_path = str(row["local_path"] or "")
+    source = DATA_DIR / local_path
+    if not local_path or not source.exists():
+        return None
+
+    already_organized = local_path.replace("\\", "/").startswith("media/accounts/")
+    already_optimized = bool(row["optimized"]) if "optimized" in row.keys() else False
+    if already_organized and already_optimized:
+        return {"stored_bytes": source.stat().st_size, "optimized": False, "migrated": False}
+
+    content_type = str(row["content_type"] or content_type_from_path(local_path))
+    original = source.read_bytes()
+    stored, stored_type, suffix, optimized = optimize_image_bytes(original, content_type, settings)
+    target_dir = media_target_dir(mp_id, article_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    destination = target_dir / media_filename(index, url, suffix)
+    destination.write_bytes(stored)
+    relative = destination.relative_to(DATA_DIR).as_posix()
+
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE media_assets
+            SET mp_id=?, local_path=?, content_type=?, bytes=?, original_bytes=?,
+                optimized=?, stored_format=?, status='cached', error='', cached_at=?
+            WHERE article_id=? AND source_url=?
+            """,
+            (
+                mp_id,
+                relative,
+                stored_type,
+                len(stored),
+                len(original),
+                1 if optimized else 0,
+                suffix.lstrip("."),
+                utc_now(),
+                article_id,
+                url,
+            ),
+        )
+        still_used = conn.execute(
+            "SELECT COUNT(*) AS c FROM media_assets WHERE local_path=?",
+            (local_path,),
+        ).fetchone()["c"]
+    if still_used == 0 and source != destination:
+        source.unlink(missing_ok=True)
+
+    return {
+        "stored_bytes": len(stored),
+        "original_bytes": len(original),
+        "optimized": optimized,
+        "migrated": source != destination,
+    }
+
+
 def cached_media_map(article_id: str) -> dict[str, str]:
     with connect() as conn:
         rows = conn.execute(
@@ -208,22 +354,54 @@ def cached_media_map(article_id: str) -> dict[str, str]:
     return {row["source_url"]: media_public_path(row["local_path"]) for row in rows}
 
 
-async def cache_article_images(article_id: str, raw_html: str) -> dict[str, Any]:
+async def cache_article_images(article_id: str, mp_id: str | None, raw_html: str) -> dict[str, Any]:
+    settings = effective_settings()
+    mode = (settings.media_cache_mode or "optimized_local").strip().lower()
     urls = extract_image_urls(raw_html)
-    stats = {"images_seen": len(urls), "images_cached": 0, "image_errors": 0}
-    if not urls:
+    stats = {
+        "images_seen": len(urls),
+        "images_cached": 0,
+        "image_errors": 0,
+        "image_original_bytes": 0,
+        "image_stored_bytes": 0,
+        "images_optimized": 0,
+        "media_cache_mode": mode,
+    }
+    if not urls or mode in {"off", "none", "disabled"}:
+        return stats
+    if mode in {"remote", "passthrough", "external"}:
+        with connect() as conn:
+            for url in urls:
+                conn.execute(
+                    """
+                    INSERT INTO media_assets(article_id, mp_id, source_url, status, error, cached_at)
+                    VALUES (?, ?, ?, 'remote', '', ?)
+                    ON CONFLICT(article_id, source_url) DO UPDATE SET
+                        mp_id=excluded.mp_id,
+                        status='remote',
+                        error='',
+                        cached_at=excluded.cached_at
+                    """,
+                    (article_id, mp_id, url, utc_now()),
+                )
         return stats
 
-    target_dir = media_dir() / "articles" / article_id.replace("/", "_")
+    target_dir = media_target_dir(mp_id, article_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, trust_env=False) as client:
         for index, url in enumerate(urls, 1):
             with connect() as conn:
                 row = conn.execute(
-                    "SELECT status, local_path FROM media_assets WHERE article_id=? AND source_url=?",
+                    "SELECT * FROM media_assets WHERE article_id=? AND source_url=?",
                     (article_id, url),
                 ).fetchone()
             if row and row["status"] == "cached" and row["local_path"] and (DATA_DIR / row["local_path"]).exists():
+                migrated = migrate_cached_media(article_id, mp_id, index, url, row, settings)
+                if migrated:
+                    stats["image_stored_bytes"] += int(migrated.get("stored_bytes") or 0)
+                    stats["image_original_bytes"] += int(migrated.get("original_bytes") or 0)
+                    if migrated.get("optimized"):
+                        stats["images_optimized"] += 1
                 stats["images_cached"] += 1
                 continue
             try:
@@ -232,39 +410,63 @@ async def cache_article_images(article_id: str, raw_html: str) -> dict[str, Any]
                 content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                 if not content_type.startswith("image/"):
                     raise RuntimeError(f"not an image: {content_type or 'unknown'}")
-                suffix = media_extension(content_type, url)
-                filename = f"{index:03d}-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]}{suffix}"
+                original = response.content
+                stats["image_original_bytes"] += len(original)
+                stored, stored_type, suffix, optimized = optimize_image_bytes(original, content_type, settings)
+                filename = media_filename(index, url, suffix)
                 destination = target_dir / filename
-                destination.write_bytes(response.content)
+                destination.write_bytes(stored)
                 relative = destination.relative_to(DATA_DIR).as_posix()
                 with connect() as conn:
                     conn.execute(
                         """
-                        INSERT INTO media_assets(article_id, source_url, local_path, content_type, bytes, status, error, cached_at)
-                        VALUES (?, ?, ?, ?, ?, 'cached', '', ?)
+                        INSERT INTO media_assets(
+                            article_id, mp_id, source_url, local_path, content_type, bytes,
+                            original_bytes, optimized, stored_format, status, error, cached_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'cached', '', ?)
                         ON CONFLICT(article_id, source_url) DO UPDATE SET
+                            mp_id=excluded.mp_id,
                             local_path=excluded.local_path,
                             content_type=excluded.content_type,
                             bytes=excluded.bytes,
+                            original_bytes=excluded.original_bytes,
+                            optimized=excluded.optimized,
+                            stored_format=excluded.stored_format,
                             status='cached',
                             error='',
                             cached_at=excluded.cached_at
                         """,
-                        (article_id, url, relative, content_type, len(response.content), utc_now()),
+                        (
+                            article_id,
+                            mp_id,
+                            url,
+                            relative,
+                            stored_type,
+                            len(stored),
+                            len(original),
+                            1 if optimized else 0,
+                            suffix.lstrip("."),
+                            utc_now(),
+                        ),
                     )
                 stats["images_cached"] += 1
+                stats["image_stored_bytes"] += len(stored)
+                if optimized:
+                    stats["images_optimized"] += 1
             except Exception as exc:
                 with connect() as conn:
                     conn.execute(
                         """
-                        INSERT INTO media_assets(article_id, source_url, status, error, cached_at)
-                        VALUES (?, ?, 'failed', ?, ?)
+                        INSERT INTO media_assets(article_id, mp_id, source_url, status, error, cached_at)
+                        VALUES (?, ?, ?, 'failed', ?, ?)
                         ON CONFLICT(article_id, source_url) DO UPDATE SET
+                            mp_id=excluded.mp_id,
                             status='failed',
                             error=excluded.error,
                             cached_at=excluded.cached_at
                         """,
-                        (article_id, url, str(exc), utc_now()),
+                        (article_id, mp_id, url, str(exc), utc_now()),
                     )
                 stats["image_errors"] += 1
     return stats
@@ -370,7 +572,17 @@ def save_settings(update: dict[str, Any]) -> Settings:
             continue
         if value in (None, "") and key.endswith("_key"):
             continue
-        if key in {"schedule_days", "sync_limit", "max_article_chars", "llm_timeout_seconds"}:
+        if key in {
+            "schedule_days",
+            "sync_limit",
+            "max_article_chars",
+            "llm_timeout_seconds",
+            "media_max_width",
+            "media_image_quality",
+            "rag_chunk_size",
+            "rag_chunk_overlap",
+            "rag_top_k",
+        }:
             value = int(value)
         if key == "llm_temperature":
             value = float(value)
@@ -378,9 +590,23 @@ def save_settings(update: dict[str, Any]) -> Settings:
             value = float(value)
         if key == "notify_top_n":
             value = int(value)
-        if key in {"auto_run", "allow_llm"}:
+        if key in {"auto_run", "allow_llm", "media_prefer_webp", "rag_enabled"}:
             value = bool(value)
-        if key in {"werss_base_url", "llm_base_url"} and value:
+        if key == "rag_chunk_size":
+            value = max(200, min(3000, int(value)))
+        if key == "rag_chunk_overlap":
+            value = max(0, min(800, int(value)))
+        if key == "rag_top_k":
+            value = max(1, min(30, int(value)))
+        if key == "media_cache_mode":
+            value = str(value or "optimized_local").strip().lower()
+            if value not in {"optimized_local", "remote", "off"}:
+                value = "optimized_local"
+        if key == "media_image_quality":
+            value = max(50, min(95, int(value)))
+        if key == "media_max_width":
+            value = max(0, min(6000, int(value)))
+        if key in {"werss_base_url", "llm_base_url", "rag_api_base_url"} and value:
             value = str(value).rstrip("/")
         current[key] = value
     set_setting("config", current)
@@ -417,6 +643,25 @@ def article_hash(article: dict[str, Any]) -> str:
         ]
     )
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def chunk_hash(text: str) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    return hashlib.sha256(compact.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def article_rag_text(article: dict[str, Any]) -> str:
+    parts = [
+        str(article.get("title") or ""),
+        str(article.get("description") or ""),
+        str(article.get("content") or article.get("content_html") or ""),
+    ]
+    summary = article.get("summary_json")
+    if isinstance(summary, str) and summary:
+        parts.append(summary)
+    elif isinstance(summary, dict):
+        parts.append(json_dumps(summary))
+    return "\n\n".join(part for part in parts if part.strip())
 
 
 def normalize_publish_time(value: Any) -> int | None:
@@ -595,7 +840,11 @@ async def sync_from_werss(limit: int | None = None) -> dict[str, Any]:
                 stats["errors"] += 1
             if upsert_article(detail):
                 stats["changed"] += 1
-            image_stats = await cache_article_images(str(article["id"]), str(detail.get("content_html") or detail.get("content") or ""))
+            image_stats = await cache_article_images(
+                str(article["id"]),
+                str(detail.get("mp_id") or article.get("mp_id") or ""),
+                str(detail.get("content_html") or detail.get("content") or ""),
+            )
             stats["images_seen"] += image_stats["images_seen"]
             stats["images_cached"] += image_stats["images_cached"]
             stats["image_errors"] += image_stats["image_errors"]
@@ -656,7 +905,9 @@ def summary_needs_llm_refresh(summary: dict[str, Any]) -> bool:
     return False
 
 
-def pending_articles(limit: int = 20, allow_refresh: bool = False) -> list[dict[str, Any]]:
+def pending_articles(limit: int | None = None, allow_refresh: bool = False) -> list[dict[str, Any]]:
+    limit_value = int(limit) if limit is not None else None
+    limited = limit_value is not None and limit_value > 0
     with connect() as conn:
         rows = conn.execute(
             """
@@ -667,7 +918,6 @@ def pending_articles(limit: int = 20, allow_refresh: bool = False) -> list[dict[
                 has_content DESC,
                 value_score DESC,
                 publish_time DESC
-            LIMIT 600
             """
         ).fetchall()
     items: list[dict[str, Any]] = []
@@ -678,7 +928,7 @@ def pending_articles(limit: int = 20, allow_refresh: bool = False) -> list[dict[
             items.append(article)
         elif allow_refresh and summary_needs_llm_refresh(summary):
             items.append(article)
-        if len(items) >= limit:
+        if limited and len(items) >= limit_value:
             break
     return items
 
@@ -720,7 +970,7 @@ async def summarize_article(article: dict[str, Any], settings: Settings, llm: Ll
         return fallback
 
     system = """
-你是资深中文研究助理，负责把公众号文章做成真正可用的阅读摘要。
+你是资深中文阅读助手，负责把公众号文章做成真正可用的阅读摘要。
 要求：
 1. 必须基于全文综合判断，禁止只摘抄第一段，禁止把标题改写一遍就当摘要。
 2. 抓结论、论据、信息增量、适用读者与阅读价值。
@@ -745,8 +995,8 @@ async def summarize_article(article: dict[str, Any], settings: Settings, llm: Ll
 
 补充要求：
 - 如果正文可用，key_points 必须体现文章中后段的内容，不能只围绕开头。
-- 如果文章更像快评、纪要或盘面跟踪，要如实说明，不要拔高。
-- value_score 反映信息密度、研究价值、可复用性，不是文采评分。
+- 如果文章更像快评、资料汇编或动态跟踪，要如实说明，不要拔高。
+- value_score 反映信息密度、可读性、可复用性，不是文采评分。
 
 文章材料：
 {article_outline(article, settings.max_article_chars)}
@@ -787,12 +1037,13 @@ def store_article_summary(article_id: str, summary: dict[str, Any]) -> None:
         )
 
 
-async def summarize_pending(limit: int = 20) -> dict[str, Any]:
+async def summarize_pending(limit: int | None = None) -> dict[str, Any]:
     settings = effective_settings()
     llm = LlmClient(settings)
     articles = pending_articles(limit=limit, allow_refresh=llm.enabled)
     stats = {
         "pending": len(articles),
+        "limit": int(limit) if limit is not None and int(limit) > 0 else None,
         "summarized": 0,
         "errors": 0,
         "llm_enabled": llm.enabled,
@@ -1001,7 +1252,216 @@ async def refresh_profiles() -> dict[str, Any]:
     return stats
 
 
-async def full_update(limit: int | None = None, summarize_limit: int = 30) -> dict[str, Any]:
+def knowledge_status() -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS chunks,
+              COALESCE(SUM(CASE WHEN embedding_json IS NOT NULL AND embedding_json != '' THEN 1 ELSE 0 END), 0) AS embedded,
+              COALESCE(SUM(CASE WHEN embedding_json IS NULL OR embedding_json = '' THEN 1 ELSE 0 END), 0) AS pending
+            FROM rag_chunks
+            """
+        ).fetchone()
+        article_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM articles WHERE has_content=1 OR content_chars > 0"
+        ).fetchone()
+    settings = effective_settings()
+    return {
+        "enabled": settings.rag_enabled,
+        "embedding_configured": bool(settings.rag_api_key and settings.rag_api_base_url and settings.rag_embedding_model),
+        "articles": int(article_row["c"] or 0),
+        "chunks": int(row["chunks"] or 0),
+        "embedded": int(row["embedded"] or 0),
+        "pending": int(row["pending"] or 0),
+        "model": settings.rag_embedding_model,
+    }
+
+
+async def rebuild_knowledge_index(limit: int | None = None, embed_batch_size: int = 100) -> dict[str, Any]:
+    settings = effective_settings()
+    max_articles = int(limit) if limit is not None and int(limit) > 0 else None
+    query = """
+        SELECT *
+        FROM articles
+        WHERE (has_content=1 OR content_chars > 0 OR summary_json IS NOT NULL)
+        ORDER BY publish_time DESC
+    """
+    params: list[Any] = []
+    if max_articles:
+        query += " LIMIT ?"
+        params.append(max_articles)
+    with connect() as conn:
+        articles = [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    stats = {
+        "articles": len(articles),
+        "chunks": 0,
+        "inserted": 0,
+        "skipped": 0,
+        "embedded": 0,
+        "errors": 0,
+        "rag_enabled": settings.rag_enabled,
+    }
+    update_run_progress("构建知识库", f"准备处理 {len(articles)} 篇文章", stats, 0 if articles else 100)
+    for index, article in enumerate(articles, 1):
+        try:
+            result = upsert_rag_chunks(article)
+            stats["chunks"] += result["chunks"]
+            stats["inserted"] += result["inserted"]
+            stats["skipped"] += result["skipped"]
+        except Exception:
+            stats["errors"] += 1
+        update_run_progress(
+            "构建知识库",
+            f"已切分 {index} / {len(articles)} 篇，新增 {stats['inserted']} 个片段",
+            stats,
+            (index / max(len(articles), 1)) * 45,
+        )
+
+    if settings.rag_enabled:
+        while True:
+            batch = await embed_pending_chunks(limit=embed_batch_size)
+            if not batch.get("enabled"):
+                stats["embedding_configured"] = False
+                break
+            count = int(batch.get("embedded") or 0)
+            if count <= 0:
+                break
+            stats["embedded"] += count
+            status = knowledge_status()
+            update_run_progress(
+                "生成向量",
+                f"已生成 {stats['embedded']} 个片段向量，剩余 {status['pending']} 个",
+                stats,
+                45 + min(50, (stats["embedded"] / max(stats["inserted"] or stats["chunks"], 1)) * 50),
+            )
+            await asyncio.sleep(0.1)
+
+    stats["status"] = knowledge_status()
+    update_run_progress("知识库完成", f"知识库索引完成：{stats['status']['embedded']} 个可检索片段", stats, 100)
+    return stats
+
+
+async def knowledge_rebuild_update(limit: int | None = None, embed_batch_size: int = 100) -> dict[str, Any]:
+    async with RUN_LOCK:
+        run_id = start_run("knowledge")
+        start_current_run("knowledge", run_id, "开始构建知识库索引")
+        try:
+            stats = await rebuild_knowledge_index(limit=limit, embed_batch_size=embed_batch_size)
+            finish_run(run_id, "success", "knowledge index completed", stats)
+            complete_current_run("success", "知识库索引完成", stats)
+            return stats
+        except Exception as exc:
+            finish_run(run_id, "failed", str(exc), {})
+            complete_current_run("failed", str(exc), {})
+            raise
+
+
+async def ask_knowledge(question: str, top_k: int | None = None, mp_id: str | None = None) -> dict[str, Any]:
+    settings = effective_settings()
+    if not settings.rag_enabled:
+        raise RuntimeError("知识库问答未启用")
+    if not question.strip():
+        raise RuntimeError("问题不能为空")
+
+    embedder = EmbeddingClient(settings)
+    if not embedder.enabled:
+        raise RuntimeError("向量模型未配置")
+    query_embedding = (await embedder.embed([question.strip()]))[0]
+    matches = search_rag_chunks(query_embedding, top_k=top_k or settings.rag_top_k, mp_id=mp_id)
+    if not matches:
+        return {
+            "answer": "当前知识库里没有找到足够相关的文章片段。",
+            "sources": [],
+            "matches": [],
+            "confidence": "low",
+        }
+
+    contexts = []
+    sources = []
+    seen_articles: set[str] = set()
+    for index, match in enumerate(matches, 1):
+        contexts.append(
+            "\n".join(
+                [
+                    f"[{index}] 公众号：{match.get('mp_name') or ''}",
+                    f"标题：{match.get('title') or ''}",
+                    f"相似度：{float(match.get('score') or 0):.3f}",
+                    f"片段：{match.get('chunk_text') or ''}",
+                ]
+            )
+        )
+        article_id = str(match.get("article_id") or "")
+        if article_id and article_id not in seen_articles:
+            seen_articles.add(article_id)
+            sources.append(
+                {
+                    "article_id": article_id,
+                    "title": match.get("title"),
+                    "mp_name": match.get("mp_name"),
+                    "url": match.get("url"),
+                    "publish_time": match.get("publish_time"),
+                    "score": round(float(match.get("score") or 0), 4),
+                }
+            )
+
+    llm_settings = settings_from_mapping(
+        {
+            **asdict(settings),
+            "llm_base_url": settings.rag_api_base_url,
+            "llm_api_key": settings.rag_api_key,
+            "llm_model": settings.rag_chat_model,
+            "allow_llm": True,
+        }
+    )
+    llm = LlmClient(llm_settings)
+    system = """
+你是公众号文章知识库问答助手。只能基于给定片段回答。
+要求：
+1. 先直接回答问题。
+2. 如果多个来源观点不同，要分公众号/文章说明各自逻辑。
+3. 标明共识、分歧和证据不足之处。
+4. 引用来源编号，例如 [1]、[2]。
+5. 只输出 JSON。
+"""
+    user = f"""
+问题：{question.strip()}
+
+相关片段：
+{chr(10).join(contexts)}
+
+请输出 JSON：
+{{
+  "answer": "综合回答",
+  "consensus": ["共识"],
+  "differences": ["分歧"],
+  "source_notes": ["按来源说明观点和逻辑"],
+  "confidence": "low|medium|high"
+}}
+"""
+    result = await llm.chat_json(system.strip(), user.strip())
+    return {
+        "answer": str(result.get("answer") or ""),
+        "consensus": result.get("consensus") or [],
+        "differences": result.get("differences") or [],
+        "source_notes": result.get("source_notes") or [],
+        "confidence": result.get("confidence") or "medium",
+        "sources": sources,
+        "matches": [
+            {
+                "article_id": item.get("article_id"),
+                "title": item.get("title"),
+                "mp_name": item.get("mp_name"),
+                "score": round(float(item.get("score") or 0), 4),
+                "chunk_text": str(item.get("chunk_text") or "")[:420],
+            }
+            for item in matches
+        ],
+    }
+
+
+async def full_update(limit: int | None = None, summarize_limit: int | None = None) -> dict[str, Any]:
     async with RUN_LOCK:
         run_id = start_run("full_update")
         start_current_run("full_update", run_id, "开始同步、总结和画像更新")
@@ -1045,7 +1505,7 @@ async def sync_update(limit: int | None = None) -> dict[str, Any]:
             raise
 
 
-async def summarize_update(limit: int = 30) -> dict[str, Any]:
+async def summarize_update(limit: int | None = None) -> dict[str, Any]:
     async with RUN_LOCK:
         run_id = start_run("summarize")
         start_current_run("summarize", run_id, "开始生成文章摘要")
@@ -1247,9 +1707,6 @@ def classify_paragraph(text: str) -> str:
     disclaimer_signals = [
         "免责声明",
         "风险自负",
-        "不构成任何买卖建议",
-        "不构成投资建议",
-        "据此入市",
     ]
     promo_signals = [
         "加入我的知识星球",
@@ -1433,6 +1890,139 @@ def list_accounts() -> list[dict[str, Any]]:
     return result
 
 
+def rag_chunk_count() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM rag_chunks").fetchone()
+    return int(row["c"] or 0)
+
+
+def upsert_rag_chunks(article: dict[str, Any], source_type: str = "article") -> dict[str, Any]:
+    settings = effective_settings()
+    text = article_rag_text(article)
+    chunks = split_text_for_rag(text, chunk_size=settings.rag_chunk_size, overlap=settings.rag_chunk_overlap)
+    inserted = 0
+    skipped = 0
+    now = utc_now()
+    with connect() as conn:
+        for index, chunk in enumerate(chunks, 1):
+            digest = chunk_hash(chunk)
+            row = conn.execute(
+                "SELECT id, chunk_text, embedding_json, embedding_model FROM rag_chunks WHERE article_id=? AND chunk_hash=?",
+                (article.get("id"), digest),
+            ).fetchone()
+            if row and row["chunk_text"] == chunk:
+                skipped += 1
+                continue
+            conn.execute(
+                """
+                INSERT INTO rag_chunks(
+                    article_id, mp_id, chunk_index, chunk_text, chunk_hash, token_count,
+                    embedding_json, embedding_model, source_type, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(article_id, chunk_hash) DO UPDATE SET
+                    mp_id=excluded.mp_id,
+                    chunk_index=excluded.chunk_index,
+                    chunk_text=excluded.chunk_text,
+                    token_count=excluded.token_count,
+                    source_type=excluded.source_type,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    article.get("id"),
+                    article.get("mp_id"),
+                    index,
+                    chunk,
+                    digest,
+                    max(1, round(len(chunk) / 3.5)),
+                    None,
+                    None,
+                    source_type,
+                    now,
+                    now,
+                ),
+            )
+            inserted += 1
+    return {"chunks": len(chunks), "inserted": inserted, "skipped": skipped}
+
+
+async def embed_pending_chunks(limit: int = 200) -> dict[str, Any]:
+    settings = effective_settings()
+    client = EmbeddingClient(settings)
+    if not client.enabled:
+        return {"enabled": False, "embedded": 0, "updated": 0, "pending": 0}
+
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, article_id, chunk_text
+            FROM rag_chunks
+            WHERE embedding_json IS NULL OR embedding_json = ''
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+
+    if not rows:
+        return {"enabled": True, "embedded": 0, "updated": 0, "pending": 0}
+
+    texts = [row["chunk_text"] for row in rows]
+    embeddings = await client.embed(texts)
+    updated = 0
+    with connect() as conn:
+        for row, embedding in zip(rows, embeddings):
+            conn.execute(
+                """
+                UPDATE rag_chunks
+                SET embedding_json=?, embedding_model=?, updated_at=?
+                WHERE id=?
+                """,
+                (json_dumps(embedding), settings.rag_embedding_model, utc_now(), row["id"]),
+            )
+            updated += 1
+    return {"enabled": True, "embedded": len(embeddings), "updated": updated, "pending": 0}
+
+
+def fetch_rag_chunks(limit: int = 5000) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT rc.*, a.title, a.mp_name, a.url, a.publish_time, a.summary_json, a.value_score, a.tags_json
+            FROM rag_chunks rc
+            LEFT JOIN articles a ON a.id = rc.article_id
+            WHERE rc.embedding_json IS NOT NULL AND rc.embedding_json != ''
+            ORDER BY rc.updated_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["embedding"] = json_loads(item.pop("embedding_json", None), [])
+        item["summary"] = json_loads(item.pop("summary_json", None), {})
+        item["tags"] = json_loads(item.pop("tags_json", None), [])
+        items.append(item)
+    return items
+
+
+def search_rag_chunks(query_embedding: list[float], top_k: int = 8, mp_id: str | None = None) -> list[dict[str, Any]]:
+    chunks = fetch_rag_chunks(limit=8000)
+    scored: list[dict[str, Any]] = []
+    for chunk in chunks:
+        if mp_id and chunk.get("mp_id") != mp_id:
+            continue
+        score = cosine_similarity(query_embedding, chunk.get("embedding") or [])
+        if score < 0:
+            continue
+        chunk = dict(chunk)
+        chunk["score"] = score
+        scored.append(chunk)
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[: max(1, int(top_k))]
+
+
 def get_account(account_id: str, article_limit: int = 80) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
@@ -1552,7 +2142,7 @@ async def scheduler_loop() -> None:
             continue
         if schedule_due(settings) and not is_run_active():
             try:
-                await full_update(limit=settings.sync_limit, summarize_limit=50)
+                await full_update(limit=settings.sync_limit)
             except Exception:
                 pass
             await asyncio.sleep(60)

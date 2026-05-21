@@ -1,6 +1,7 @@
 import json
 import re
 import time
+import math
 from html import unescape
 from typing import Any
 
@@ -95,6 +96,29 @@ class LlmClient:
                 response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             return response.json(), response.status_code
+
+
+class EmbeddingClient:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.settings.rag_enabled and self.settings.rag_api_key and self.settings.rag_api_base_url and self.settings.rag_embedding_model)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self.enabled:
+            raise RuntimeError("Embedding is not configured")
+        payload = {"model": self.settings.rag_embedding_model, "input": texts}
+        headers = {
+            "Authorization": f"Bearer {self.settings.rag_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=120, trust_env=False) as client:
+            response = await client.post(f"{self.settings.rag_api_base_url}/embeddings", headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        return [item["embedding"] for item in data.get("data") or []]
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -229,7 +253,7 @@ def build_heuristic_one_sentence(title: str, description: str, lead: str, tags: 
     focus = "、".join(tags[:3]) if tags else "主题判断"
     if lead:
         return f"这篇文章主要讨论{focus}，重点信息落在：{lead[:110]}"
-    return f"这是一篇关于{focus}的短文，目前更适合作为线索输入而不是完整研究结论。"
+    return f"这是一篇关于{focus}的短文，目前更适合作为线索输入而不是完整分析结论。"
 
 
 def build_heuristic_points(paragraphs: list[str], title: str, description: str) -> list[str]:
@@ -251,16 +275,16 @@ def build_heuristic_points(paragraphs: list[str], title: str, description: str) 
 def keyword_tags(text: str) -> list[str]:
     tags: list[str] = []
     rules = [
-        ("宏观", ["宏观", "美元", "美债", "联储", "利率", "通胀", "财政", "流动性"]),
-        ("固收", ["固收", "债券", "信用", "城投", "转债", "reits"]),
-        ("A股", ["a股", "大盘", "指数", "板块", "个股", "复盘"]),
-        ("商品", ["商品", "期货", "原油", "pta", "px", "eg", "煤", "铜", "黄金"]),
-        ("科技", ["ai", "光模块", "通信", "算力", "cpo", "tfln", "半导体"]),
-        ("医药", ["医药", "创新药", "临床", "医保", "药企"]),
-        ("日本", ["日本", "日元", "东京", "央行", "加息"]),
-        ("交易", ["交易", "择时", "策略", "仓位", "技术", "趋势"]),
-        ("纪要", ["纪要", "调研", "电话会", "会议"]),
-        ("深度", ["框架", "深度", "模型", "测算", "数据"]),
+        ("教程", ["教程", "入门", "指南", "攻略", "手把手", "怎么做", "实战"]),
+        ("观点", ["观点", "看法", "评论", "解读", "判断", "分析"]),
+        ("资料", ["资料", "汇总", "盘点", "合集", "清单", "纪要", "要点"]),
+        ("深度", ["框架", "深度", "模型", "测算", "长文", "详解"]),
+        ("访谈", ["访谈", "对话", "采访", "问答", "q&a"]),
+        ("案例", ["案例", "实例", "复盘", "拆解", "演示"]),
+        ("产品", ["产品", "工具", "功能", "发布", "更新", "版本"]),
+        ("技术", ["技术", "代码", "架构", "算法", "工程", "api", "sdk"]),
+        ("行业", ["行业", "产业", "赛道", "趋势", "市场", "生态"]),
+        ("新闻", ["新闻", "公告", "快讯", "动态", "通报"]),
     ]
     lower_text = text.lower()
     for tag, words in rules:
@@ -282,9 +306,9 @@ def heuristic_score(title: str, description: str, content: str, tags: list[str])
         score += 0.2
     if "深度" in tags:
         score += 0.8
-    if "纪要" in tags:
+    if "资料" in tags:
         score += 0.5
-    if any(tag in tags for tag in ["宏观", "固收", "商品", "科技", "医药"]):
+    if any(tag in tags for tag in ["教程", "技术", "案例", "行业", "产品"]):
         score += 0.4
     if not content:
         score -= 1.4
@@ -297,10 +321,12 @@ def heuristic_score(title: str, description: str, content: str, tags: list[str])
 def infer_why_read(tags: list[str], score: float, content: str, paragraphs: list[str]) -> str:
     if score >= 8:
         return "信息密度和判断价值都比较高，适合进入优先阅读队列。"
-    if "纪要" in tags:
-        return "更适合作为一手交流线索，阅读时最好结合原始数据和后续验证。"
-    if "交易" in tags:
-        return "适合快速观察市场节奏与情绪变化，但不宜直接替代独立判断。"
+    if "资料" in tags:
+        return "更适合作为资料参考和后续检索线索，适合边读边做笔记。"
+    if "教程" in tags or "技术" in tags:
+        return "适合边看边做，重点跟着步骤、方法和示例走。"
+    if "案例" in tags:
+        return "适合快速浏览案例脉络，再提炼可复用的经验。"
     if not content:
         return "当前只有标题或摘要，可用证据不足，建议等全文补抓后再看。"
     if len(paragraphs) <= 2:
@@ -309,50 +335,51 @@ def infer_why_read(tags: list[str], score: float, content: str, paragraphs: list
 
 
 def infer_difficulty(content: str, tags: list[str]) -> str:
-    if len(content) > 9000 or "深度" in tags or "宏观" in tags:
+    if len(content) > 9000 or "深度" in tags or "技术" in tags:
         return "high"
-    if len(content) > 2500:
+    if len(content) > 2500 or "案例" in tags:
         return "medium"
     return "low"
 
 
 def infer_audience(tags: list[str], score: float) -> str:
-    if "宏观" in tags or "固收" in tags:
-        return "研究员、投资经理、需要跨资产框架的人"
-    if "商品" in tags or "交易" in tags:
-        return "交易员、商品研究员、关注市场节奏的人"
-    if "科技" in tags or "医药" in tags:
-        return "行业研究员、主题投资者"
+    if "教程" in tags or "技术" in tags:
+        return "需要快速上手、动手实践的人"
+    if "资料" in tags or "行业" in tags:
+        return "需要做资料整理或主题跟踪的人"
+    if "观点" in tags or "案例" in tags:
+        return "喜欢比较观点和拆解案例的人"
     if score >= 8:
         return "适合做重点深读"
-    return "适合做快速主题扫描"
+    return "适合做快速浏览"
 
 
 def infer_capability(tags: list[str], score: float, has_depth: int) -> str:
-    if "固收" in tags or "宏观" in tags:
-        return "偏研究框架型作者，宏观、利率和信用链条分析能力更突出。"
-    if "商品" in tags:
-        return "偏产业和交易结合型作者，对供需、库存和价格节奏比较敏感。"
-    if "科技" in tags or "医药" in tags:
-        return "偏垂直行业跟踪型作者，更适合做主题研究和产业信息输入。"
-    if "交易" in tags:
-        return "偏市场复盘和择时型作者，对盘面线索和情绪变化更敏感。"
+    if "技术" in tags or "深度" in tags:
+        return "偏框架拆解和结构化表达的作者，擅长把复杂主题讲清楚。"
+    if "资料" in tags:
+        return "偏资料整理和信息汇编型作者，适合快速获得线索。"
+    if "案例" in tags:
+        return "偏案例分析和经验复盘型作者，适合寻找实操细节。"
+    if "观点" in tags:
+        return "偏观点表达和评论型作者，适合做对照阅读。"
     if score >= 7 and has_depth >= 3:
-        return "综合研究能力不错，具备持续输出的潜力，但仍需要更多样本校准。"
+        return "综合分析能力不错，具备持续输出的潜力，但仍需要更多样本校准。"
     return "更适合作为补充信息源，价值在于提供线索与视角，而不是单点定论。"
 
 
 def infer_strengths(tags: list[str]) -> list[str]:
     mapping = {
-        "宏观": "宏观叙事与跨资产线索整理",
-        "固收": "利率、信用和债券市场框架",
-        "商品": "商品产业链与期货逻辑",
-        "科技": "科技产业主题跟踪",
-        "医药": "医药行业观察",
-        "交易": "市场节奏与交易线索提炼",
-        "纪要": "会议信息整理与纪要提炼",
-        "深度": "长文研究与框架化分析",
-        "日本": "日本政策与市场观察",
+        "教程": "步骤拆解与上手指导",
+        "观点": "评论与判断表达",
+        "资料": "信息整理与线索汇编",
+        "深度": "长文分析与框架归纳",
+        "访谈": "采访整理与问题提炼",
+        "案例": "案例分析与经验复盘",
+        "产品": "产品观察与功能解读",
+        "技术": "技术讲解与实践说明",
+        "行业": "行业观察与趋势跟踪",
+        "新闻": "事件整理与动态追踪",
     }
     strengths = [mapping[tag] for tag in tags if tag in mapping]
     return strengths[:5] or ["主题信息整理"]
@@ -365,34 +392,36 @@ def infer_weaknesses(tags: list[str], articles: list[dict[str, Any]]) -> list[st
     )
     if len(articles) < 5:
         weaknesses.append("样本量还不够大，作者画像需要继续校准。")
-    if "交易" in tags:
-        weaknesses.append("更适合观察节奏与线索，不宜直接替代独立研究。")
-    if "纪要" in tags:
-        weaknesses.append("纪要类内容依赖原始交流质量，观点需要二次验证。")
+    if "观点" in tags:
+        weaknesses.append("观点类内容更依赖上下文和持续样本，单篇判断容易偏差。")
+    if "资料" in tags:
+        weaknesses.append("资料类内容依赖原始材料完整性，最好结合全文复核。")
     if low_evidence_count > max(1, len(articles) // 2):
         weaknesses.append("可用全文样本偏少，部分判断仍建立在标题和摘要上。")
     return weaknesses[:4]
 
 
 def infer_style(tags: list[str], sample_titles: list[str]) -> str:
-    if "纪要" in tags:
-        return "偏资料整理和纪要汇编"
+    if "资料" in tags:
+        return "偏资料整理和要点汇编"
     if "深度" in tags:
-        return "偏长文研究和框架拆解"
-    if any("复盘" in title for title in sample_titles):
-        return "偏市场复盘和快评"
-    return "偏主题跟踪和观点表达"
+        return "偏长文分析和框架拆解"
+    if any("复盘" in title for title in sample_titles) or "案例" in tags:
+        return "偏案例复盘和快评"
+    if "观点" in tags:
+        return "偏观点表达和评论"
+    return "偏主题跟踪和信息整理"
 
 
 def infer_use_cases(tags: list[str]) -> list[str]:
-    if "宏观" in tags or "固收" in tags:
-        return ["做宏观框架输入", "跟踪利率信用变化", "辅助资产配置讨论"]
-    if "商品" in tags:
-        return ["跟踪供需变化", "辅助交易准备", "观察产业链边际变化"]
-    if "科技" in tags or "医药" in tags:
-        return ["做行业跟踪", "补充主题观点", "寻找产业催化线索"]
-    if "交易" in tags:
-        return ["盘后复盘", "观察短期情绪", "跟踪节奏变化"]
+    if "教程" in tags or "技术" in tags:
+        return ["做学习参考", "辅助上手实践", "快速找到操作路径"]
+    if "资料" in tags or "行业" in tags:
+        return ["做资料整理", "辅助主题扫描", "跟踪趋势变化"]
+    if "观点" in tags or "案例" in tags:
+        return ["做观点对照", "补充案例参考", "寻找可复用经验"]
+    if "深度" in tags:
+        return ["做深度阅读", "提炼框架", "沉淀长期笔记"]
     return ["做主题扫描", "补充信息输入"]
 
 
@@ -400,3 +429,52 @@ def estimate_reading_time(content: str) -> int:
     if not content:
         return 1
     return max(1, round(len(content) / 850))
+
+
+def split_text_for_rag(text: str, chunk_size: int = 900, overlap: int = 140) -> list[str]:
+    cleaned = re.sub(r"\n{3,}", "\n\n", strip_html(text or "")).strip()
+    if not cleaned:
+        return []
+    chunk_size = max(200, int(chunk_size))
+    overlap = max(0, min(int(overlap), chunk_size - 50))
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", cleaned) if part.strip()]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if len(current) + len(paragraph) + 2 <= chunk_size:
+            current = f"{current}\n\n{paragraph}".strip()
+            continue
+        if current:
+            chunks.append(current[:chunk_size])
+        if len(paragraph) <= chunk_size:
+            current = paragraph
+            continue
+        start = 0
+        while start < len(paragraph):
+            end = min(len(paragraph), start + chunk_size)
+            chunks.append(paragraph[start:end])
+            if end >= len(paragraph):
+                current = ""
+                break
+            start = max(0, end - overlap)
+    if current:
+        chunks.append(current[:chunk_size])
+    deduped: list[str] = []
+    seen = set()
+    for chunk in chunks:
+        key = re.sub(r"\s+", " ", chunk).strip()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(chunk.strip())
+    return deduped
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return -1.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if not left_norm or not right_norm:
+        return -1.0
+    return dot / (left_norm * right_norm)

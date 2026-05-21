@@ -66,6 +66,7 @@ function runTypeLabel(value) {
     full_update: "同步并总结",
     sync: "只同步",
     summarize: "只总结",
+    knowledge: "知识库索引",
   };
   return labels[value] || value || "任务";
 }
@@ -215,6 +216,7 @@ function flattenStats(stats = {}) {
   }
   return [
     ["公众号", stats.accounts],
+    ["文章", stats.articles],
     ["看到文章", stats.articles_seen],
     ["详情加载", stats.details_loaded],
     ["更新文章", stats.changed],
@@ -223,6 +225,9 @@ function flattenStats(stats = {}) {
     ["已总结", stats.summarized],
     ["LLM摘要", stats.llm_summaries],
     ["规则摘要", stats.heuristic_summaries],
+    ["片段", stats.chunks],
+    ["新增片段", stats.inserted],
+    ["生成向量", stats.embedded],
     ["画像更新", stats.profiled],
     ["错误", stats.errors],
   ];
@@ -253,7 +258,7 @@ function renderRunStatus(status = {}) {
     .join("");
   $("#taskStats").innerHTML = statHtml || statItem("状态", runStatusLabel(status.status || "idle"));
 
-  ["#runFull", "#runSync", "#runSummarize"].forEach((selector) => {
+  ["#runFull", "#runSync", "#runSummarize", "#rebuildKnowledge"].forEach((selector) => {
     const button = $(selector);
     if (button) button.disabled = running;
   });
@@ -547,6 +552,70 @@ async function loadDailyStats() {
   $("#dailyStatsNote").textContent = data.token_note || "";
 }
 
+function renderKnowledgeStatus(data = {}) {
+  $("#knowledgeStatus").innerHTML = [
+    statItem("状态", data.enabled ? "已启用" : "未启用"),
+    statItem("向量配置", data.embedding_configured ? "已配置" : "未配置"),
+    statItem("文章", data.articles ?? 0),
+    statItem("片段", data.chunks ?? 0),
+    statItem("可检索", data.embedded ?? 0),
+    statItem("待生成", data.pending ?? 0),
+  ].join("");
+}
+
+async function loadKnowledgeStatus() {
+  const data = await api("/api/knowledge/status");
+  renderKnowledgeStatus(data);
+}
+
+function renderKnowledgeAnswer(data = {}) {
+  const sources = data.sources || [];
+  $("#knowledgeAnswer").innerHTML = `
+    <div class="knowledge-result">
+      <div class="panel-head slim">
+        <h3>回答</h3>
+        <span>置信度 ${escapeHtml(data.confidence || "-")}</span>
+      </div>
+      <div class="knowledge-answer-body">
+        <p>${escapeHtml(data.answer || "暂无回答")}</p>
+        ${(data.consensus || []).length ? `<h4>共识</h4><ul>${data.consensus.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+        ${(data.differences || []).length ? `<h4>分歧</h4><ul>${data.differences.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+        ${(data.source_notes || []).length ? `<h4>来源逻辑</h4><ul>${data.source_notes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+        <h4>引用来源</h4>
+        <div class="source-list">
+          ${sources.map((source, index) => `
+            <article class="source-item">
+              <strong>[${index + 1}] ${escapeHtml(source.title || "未命名文章")}</strong>
+              <div class="article-meta">
+                <span>${escapeHtml(source.mp_name || "未知公众号")}</span>
+                <span>相似度 ${Number(source.score || 0).toFixed(3)}</span>
+                ${source.url ? `<a class="inline-link" href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">原文</a>` : ""}
+              </div>
+            </article>
+          `).join("") || `<div class="empty-state small">暂无引用来源。</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function askKnowledge() {
+  const question = $("#knowledgeQuestion").value.trim();
+  if (!question) {
+    toast("请输入问题");
+    return;
+  }
+  $("#knowledgeAnswer").innerHTML = `<div class="empty-state">正在检索并综合回答...</div>`;
+  const result = await api("/api/knowledge/ask", {
+    method: "POST",
+    body: JSON.stringify({
+      question,
+      top_k: Number($("#knowledgeTopK").value || 8),
+    }),
+  });
+  renderKnowledgeAnswer(result);
+}
+
 async function refreshAll() {
   await Promise.allSettled([
     loadDashboard(),
@@ -555,6 +624,7 @@ async function refreshAll() {
     loadConfig(),
     loadWerssStatus(),
     loadDailyStats(),
+    loadKnowledgeStatus(),
   ]);
   await loadRunStatus();
   if (state.selectedAccountId) {
@@ -571,6 +641,7 @@ function switchView(view) {
     dashboard: ["总览", "按阅读价值组织你的公众号信息流。"],
     reader: ["阅读队列", "优先处理高分文章，保留已读与收藏状态。"],
     accounts: ["作者画像", "按作者能力、方向和样本文章做信息源管理。"],
+    knowledge: ["知识库", "围绕同一问题检索全库文章，比较观点和论证逻辑。"],
     settings: ["配置", "连接 WeRSS 与任意 OpenAI-compatible 大模型接口。"],
   };
   $("#viewTitle").textContent = titles[view][0];
@@ -690,6 +761,8 @@ function bindEvents() {
   $("#runFull").addEventListener("click", () => runTask("/api/run/full", "已启动同步并总结"));
   $("#runSync").addEventListener("click", () => runTask("/api/run/sync", "已启动同步"));
   $("#runSummarize").addEventListener("click", () => runTask("/api/run/summarize", "已启动总结"));
+  $("#rebuildKnowledge").addEventListener("click", () => runTask("/api/knowledge/rebuild", "已启动知识库索引"));
+  $("#askKnowledge").addEventListener("click", askKnowledge);
   $("#testLlm").addEventListener("click", testLlmConnection);
   $("#refreshDailyStats").addEventListener("click", async () => {
     await loadDailyStats();
