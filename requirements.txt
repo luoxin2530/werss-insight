@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 python-multipart==0.0.9
 tzdata==2025.2
 Pillow==10.4.0
+fastembed==0.8.0

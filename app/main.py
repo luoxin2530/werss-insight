@@ -62,6 +62,8 @@ class ConfigUpdate(BaseModel):
     media_image_quality: int | None = None
     media_prefer_webp: bool | None = None
     rag_enabled: bool | None = None
+    rag_embedding_provider: str | None = None
+    rag_local_embedding_model: str | None = None
     rag_api_base_url: str | None = None
     rag_api_key: str | None = None
     rag_embedding_model: str | None = None
@@ -105,7 +107,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="WeRSS Insight", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="WeRSS Insight", version="0.1.1", lifespan=lifespan)
 static_dir = ROOT_DIR / "static"
 media_dir = DATA_DIR / "media"
 media_dir.mkdir(parents=True, exist_ok=True)

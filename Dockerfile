@@ -12,7 +12,8 @@ COPY app ./app
 COPY static ./static
 COPY README.md .
 
-RUN mkdir -p /app/data/media
+RUN mkdir -p /app/data/media /app/bundled_models/fastembed \
+    && python -c "from fastembed import TextEmbedding; list(TextEmbedding(model_name='BAAI/bge-small-zh-v1.5', cache_dir='/app/bundled_models/fastembed').embed(['warmup']))"
 
 VOLUME ["/app/data"]
 EXPOSE 8765

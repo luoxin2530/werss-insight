@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WeRSS Insight</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260521-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260521-3" />
   </head>
   <body>
     <div class="shell">
@@ -183,13 +183,22 @@
 
             <section class="panel">
               <div class="panel-head"><h3>知识库</h3></div>
-              <label>向量接口地址<input name="rag_api_base_url" /></label>
-              <label>向量 API Key<input name="rag_api_key" type="password" placeholder="留空表示不修改" /></label>
-              <label>向量模型<input name="rag_embedding_model" /></label>
-              <label>问答模型<input name="rag_chat_model" /></label>
+              <label>
+                向量来源
+                <select name="rag_embedding_provider">
+                  <option value="local">内置本地模型（免费）</option>
+                  <option value="remote">自定义远程接口</option>
+                </select>
+              </label>
+              <label>本地向量模型<input name="rag_local_embedding_model" placeholder="BAAI/bge-small-zh-v1.5" /></label>
+              <label>远程向量接口地址<input name="rag_api_base_url" placeholder="仅远程模式需要，例如 https://api.openai.com/v1" /></label>
+              <label>远程向量 API Key<input name="rag_api_key" type="password" placeholder="仅远程模式需要，留空表示不修改" /></label>
+              <label>远程向量模型<input name="rag_embedding_model" placeholder="仅远程模式需要，例如 text-embedding-3-small" /></label>
+              <label>问答模型<input name="rag_chat_model" placeholder="留空则复用上方总结模型" /></label>
               <label>片段长度<input name="rag_chunk_size" type="number" min="200" max="3000" /></label>
               <label>召回数量<input name="rag_top_k" type="number" min="1" max="30" /></label>
               <label class="check-row"><input name="rag_enabled" type="checkbox" />启用知识库问答</label>
+              <p class="footnote">向量模型负责检索相似文章片段；问答模型负责把片段整理成回答。问答模型不是接口地址或 Key，留空时会复用“大模型”里的接口、Key 和模型。</p>
             </section>
 
             <section class="panel span-two">
@@ -238,6 +247,6 @@
     </div>
 
     <div class="toast" id="toast"></div>
-    <script src="/static/app.js?v=20260521-1" type="module"></script>
+    <script src="/static/app.js?v=20260521-3" type="module"></script>
   </body>
 </html>

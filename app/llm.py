@@ -1,13 +1,27 @@
+import asyncio
 import json
 import re
 import time
 import math
 from html import unescape
+from functools import lru_cache
 from typing import Any
 
 import httpx
 
-from .config import Settings
+from .config import BUNDLED_MODELS_DIR, DATA_DIR, Settings
+
+
+@lru_cache(maxsize=4)
+def local_text_embedding(model_name: str) -> Any:
+    try:
+        from fastembed import TextEmbedding
+    except ImportError as exc:
+        raise RuntimeError("内置本地向量模型需要 fastembed，请更新镜像或执行 pip install -r requirements.txt") from exc
+    bundled_dir = BUNDLED_MODELS_DIR / "fastembed"
+    cache_dir = bundled_dir if bundled_dir.exists() else DATA_DIR / "models" / "fastembed"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return TextEmbedding(model_name=model_name, cache_dir=str(cache_dir))
 
 
 class LlmClient:
@@ -104,21 +118,88 @@ class EmbeddingClient:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.settings.rag_enabled and self.settings.rag_api_key and self.settings.rag_api_base_url and self.settings.rag_embedding_model)
+        if not self.settings.rag_enabled:
+            return False
+        if self.provider == "local":
+            return bool(self.settings.rag_local_embedding_model)
+        return bool(self.settings.rag_api_key and self.settings.rag_api_base_url and self.settings.rag_embedding_model)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    @property
+    def provider(self) -> str:
+        provider = str(getattr(self.settings, "rag_embedding_provider", "local") or "local").strip().lower()
+        return provider if provider in {"local", "remote"} else "local"
+
+    @property
+    def model_name(self) -> str:
+        if self.provider == "local":
+            return self.settings.rag_local_embedding_model
+        return self.settings.rag_embedding_model
+
+    def _batch_size(self) -> int:
+        base_url = self.settings.rag_api_base_url.lower()
+        if "dashscope.aliyuncs.com" in base_url:
+            return 10
+        return 100
+
+    def _local_prefix(self, purpose: str) -> str:
+        model = self.model_name.lower()
+        if "e5" in model:
+            return "query: " if purpose == "query" else "passage: "
+        if "bge" in model and purpose == "query":
+            if "zh" in model:
+                return "为这个句子生成表示以用于检索相关文章："
+            return "Represent this sentence for searching relevant passages: "
+        return ""
+
+    async def embed(self, texts: list[str], purpose: str = "passage") -> list[list[float]]:
         if not self.enabled:
             raise RuntimeError("Embedding is not configured")
-        payload = {"model": self.settings.rag_embedding_model, "input": texts}
+        clean_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+        if not clean_texts:
+            return []
+        if self.provider == "local":
+            model = local_text_embedding(self.settings.rag_local_embedding_model)
+            prefix = self._local_prefix(purpose)
+            prepared = [f"{prefix}{text}" for text in clean_texts]
+            return await asyncio.to_thread(
+                lambda: [embedding.tolist() for embedding in model.embed(prepared)]
+            )
+
         headers = {
             "Authorization": f"Bearer {self.settings.rag_api_key}",
             "Content-Type": "application/json",
         }
+        embeddings: list[list[float]] = []
+        batch_size = max(1, self._batch_size())
+        base_url = self.settings.rag_api_base_url.rstrip("/")
+
         async with httpx.AsyncClient(timeout=120, trust_env=False) as client:
-            response = await client.post(f"{self.settings.rag_api_base_url}/embeddings", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        return [item["embedding"] for item in data.get("data") or []]
+            for start in range(0, len(clean_texts), batch_size):
+                batch = clean_texts[start : start + batch_size]
+                payload = {"model": self.settings.rag_embedding_model, "input": batch}
+                response = await client.post(f"{base_url}/embeddings", headers=headers, json=payload)
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    detail = (exc.response.text or "").strip()
+                    if exc.response.status_code == 400 and "dashscope.aliyuncs.com" in base_url.lower():
+                        raise RuntimeError(
+                            "DashScope 的 text-embedding-v4 每次最多支持 10 条输入；"
+                            "系统已自动分批，但接口仍返回 400。"
+                            f"请检查模型名、API Key 和 base_url。接口返回: {detail or exc.response.reason_phrase}"
+                        ) from exc
+                    raise RuntimeError(
+                        f"Embedding API 请求失败：HTTP {exc.response.status_code}，"
+                        f"{detail or exc.response.reason_phrase}"
+                    ) from exc
+                data = response.json()
+                batch_embeddings = [item["embedding"] for item in data.get("data") or []]
+                if len(batch_embeddings) != len(batch):
+                    raise RuntimeError(
+                        f"Embedding API 返回数量不匹配：输入 {len(batch)} 条，返回 {len(batch_embeddings)} 条"
+                    )
+                embeddings.extend(batch_embeddings)
+        return embeddings
 
 
 def parse_json_object(text: str) -> dict[str, Any]:

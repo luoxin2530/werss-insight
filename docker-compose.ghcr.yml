@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   werss-insight:
     image: ${WERSS_INSIGHT_IMAGE:-ghcr.io/luoxin2530/werss-insight:latest}

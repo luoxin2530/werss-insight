@@ -602,6 +602,10 @@ def save_settings(update: dict[str, Any]) -> Settings:
             value = str(value or "optimized_local").strip().lower()
             if value not in {"optimized_local", "remote", "off"}:
                 value = "optimized_local"
+        if key == "rag_embedding_provider":
+            value = str(value or "local").strip().lower()
+            if value not in {"local", "remote"}:
+                value = "local"
         if key == "media_image_quality":
             value = max(50, min(95, int(value)))
         if key == "media_max_width":
@@ -1267,14 +1271,38 @@ def knowledge_status() -> dict[str, Any]:
             "SELECT COUNT(*) AS c FROM articles WHERE has_content=1 OR content_chars > 0"
         ).fetchone()
     settings = effective_settings()
+    embedding_provider = str(settings.rag_embedding_provider or "local").strip().lower()
+    if embedding_provider not in {"local", "remote"}:
+        embedding_provider = "local"
+    embedding_model = (
+        settings.rag_local_embedding_model
+        if embedding_provider == "local"
+        else settings.rag_embedding_model
+    )
+    embedding_configured = bool(
+        settings.rag_enabled
+        and (
+            (embedding_provider == "local" and settings.rag_local_embedding_model)
+            or (
+                embedding_provider == "remote"
+                and settings.rag_api_key
+                and settings.rag_api_base_url
+                and settings.rag_embedding_model
+            )
+        )
+    )
+    answer_model = str(settings.rag_chat_model or "").strip() or settings.llm_model
     return {
         "enabled": settings.rag_enabled,
-        "embedding_configured": bool(settings.rag_api_key and settings.rag_api_base_url and settings.rag_embedding_model),
+        "embedding_provider": embedding_provider,
+        "embedding_configured": embedding_configured,
         "articles": int(article_row["c"] or 0),
         "chunks": int(row["chunks"] or 0),
         "embedded": int(row["embedded"] or 0),
         "pending": int(row["pending"] or 0),
-        "model": settings.rag_embedding_model,
+        "model": embedding_model,
+        "answer_model": answer_model,
+        "answer_reuses_summary_model": not bool(str(settings.rag_chat_model or "").strip()),
     }
 
 
@@ -1368,7 +1396,7 @@ async def ask_knowledge(question: str, top_k: int | None = None, mp_id: str | No
     embedder = EmbeddingClient(settings)
     if not embedder.enabled:
         raise RuntimeError("向量模型未配置")
-    query_embedding = (await embedder.embed([question.strip()]))[0]
+    query_embedding = (await embedder.embed([question.strip()], purpose="query"))[0]
     matches = search_rag_chunks(query_embedding, top_k=top_k or settings.rag_top_k, mp_id=mp_id)
     if not matches:
         return {
@@ -1409,9 +1437,7 @@ async def ask_knowledge(question: str, top_k: int | None = None, mp_id: str | No
     llm_settings = settings_from_mapping(
         {
             **asdict(settings),
-            "llm_base_url": settings.rag_api_base_url,
-            "llm_api_key": settings.rag_api_key,
-            "llm_model": settings.rag_chat_model,
+            "llm_model": str(settings.rag_chat_model or "").strip() or settings.llm_model,
             "allow_llm": True,
         }
     )
@@ -1978,7 +2004,7 @@ async def embed_pending_chunks(limit: int = 200) -> dict[str, Any]:
                 SET embedding_json=?, embedding_model=?, updated_at=?
                 WHERE id=?
                 """,
-                (json_dumps(embedding), settings.rag_embedding_model, utc_now(), row["id"]),
+                (json_dumps(embedding), client.model_name, utc_now(), row["id"]),
             )
             updated += 1
     return {"enabled": True, "embedded": len(embeddings), "updated": updated, "pending": 0}

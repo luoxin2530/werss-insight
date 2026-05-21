@@ -555,7 +555,10 @@ async function loadDailyStats() {
 function renderKnowledgeStatus(data = {}) {
   $("#knowledgeStatus").innerHTML = [
     statItem("状态", data.enabled ? "已启用" : "未启用"),
+    statItem("向量来源", data.embedding_provider === "local" ? "本地免费模型" : "远程接口"),
     statItem("向量配置", data.embedding_configured ? "已配置" : "未配置"),
+    statItem("向量模型", data.model || "-"),
+    statItem("问答模型", data.answer_model || "复用总结模型"),
     statItem("文章", data.articles ?? 0),
     statItem("片段", data.chunks ?? 0),
     statItem("可检索", data.embedded ?? 0),
@@ -782,11 +785,12 @@ function bindEvents() {
     event.preventDefault();
     const form = event.currentTarget;
     const payload = {};
+    const clearableFields = new Set(["rag_chat_model"]);
     for (const field of Array.from(form.elements)) {
       if (!field.name) continue;
       if (field.type === "checkbox") {
         payload[field.name] = field.checked;
-      } else if (field.value !== "") {
+      } else if (field.value !== "" || clearableFields.has(field.name)) {
         payload[field.name] = field.type === "number" ? Number(field.value) : field.value;
       }
     }

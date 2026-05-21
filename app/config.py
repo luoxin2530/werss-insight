@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "werss_insight.db"
+BUNDLED_MODELS_DIR = ROOT_DIR / "bundled_models"
 
 load_dotenv(ROOT_DIR / ".env")
 
@@ -44,10 +45,12 @@ class Settings:
     media_image_quality: int = int(os.getenv("MEDIA_IMAGE_QUALITY", "85"))
     media_prefer_webp: bool = env_bool("MEDIA_PREFER_WEBP", True)
     rag_enabled: bool = env_bool("RAG_ENABLED", True)
-    rag_api_base_url: str = os.getenv("RAG_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    rag_embedding_provider: str = os.getenv("RAG_EMBEDDING_PROVIDER", "local")
+    rag_local_embedding_model: str = os.getenv("RAG_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+    rag_api_base_url: str = os.getenv("RAG_API_BASE_URL", "").rstrip("/")
     rag_api_key: str = os.getenv("RAG_API_KEY", "")
     rag_embedding_model: str = os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-3-small")
-    rag_chat_model: str = os.getenv("RAG_CHAT_MODEL", "gpt-4o-mini")
+    rag_chat_model: str = os.getenv("RAG_CHAT_MODEL", "")
     rag_chunk_size: int = int(os.getenv("RAG_CHUNK_SIZE", "900"))
     rag_chunk_overlap: int = int(os.getenv("RAG_CHUNK_OVERLAP", "140"))
     rag_top_k: int = int(os.getenv("RAG_TOP_K", "8"))
